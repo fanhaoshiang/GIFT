@@ -569,7 +569,9 @@ if __name__ == "__main__":
     # from speech_engine import SpeechEngine
     class SpeechEngine(QObject): pass
     # from trigger_manager import TriggerManager
-    class TriggerManager: def __init__(self, fn): pass
+    class TriggerManager:
+        def __init__(self, fn):
+            pass
     
     # 為了簡化，我註解掉了您原檔案中大量的類別和方法。
     # 請確保在您的實際檔案中，這些類別和方法都存在。
