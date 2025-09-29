@@ -1,0 +1,14 @@
+{
+  "tiktok_url": "https://www.tiktok.com/@genk6300/live?enter_from_merge=pc_share&enter_method=pc_share&is_from_webapp=1&sender_device=pc",
+  "api_key": "MzBmZjQ3NTYyYmEzMDE0NmEzNmI0MjVmMzUwNzQ1YjliYzY5YmY5YmMzYmVjMTljMzNmMmU1",
+  "gift_map": [
+    {
+      "kw": "Rose",
+      "gid": "5655",
+      "path": "J:/20250927/土拨鼠吃红萝卜3秒.mp4"
+    }
+  ],
+  "fallback_video": "",
+  "interrupt_on_gift": false,
+  "playback_volume": 100
+}
