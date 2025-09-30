@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
     QRadioButton, QSplitter, QTabWidget, QTableWidget,
     QTableWidgetItem, QTextEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
     QWidget, QSlider, QSpinBox)
-
+from PySide6.QtCore import Signal, QObject, QRect, Qt, QPointF, QRectF, QTimer
 
 from speech_engine import SpeechEngine
 from ui_components import GiftListDialog, GameMenuContainer, MenuItemWidget, TriggerEditDialog
@@ -604,6 +604,7 @@ class ResizableVideoFrame(QFrame):
         if self._is_dragging:
             delta = event.globalPosition() - self._start_pos
             new_geom = QRectF(self._start_geom)
+            new_rect = new_geom.toRect()
             # ...原計算略...
             self.setGeometry(new_rect)
             self.layout_changed_by_user.emit(new_rect)
