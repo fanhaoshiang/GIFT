@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
 from speech_engine import SpeechEngine
 from ui_components import GiftListDialog, GameMenuContainer, MenuItemWidget, TriggerEditDialog
 from trigger_manager import TriggerManager
+from data_managers import LayoutsManager, SettingsManager, LibraryManager, ThemeManager
 
 # --- Pillow 依賴 (用於 WebP 支援) ---
 try:
@@ -1045,19 +1046,30 @@ class MainWindow(QMainWindow):
     TRIGGER_FILE = os.path.join(application_path, "triggers.json")
 
     DEV_LOG_CONTENT = """<h3>版本更新歷史</h3>
-<p><b>V9.51-DedupeFix</b></p>
-<ul><li>修復 Bug：修正了事件去重功能因缺少屬性初始化而導致的 AttributeError。</li></ul>
-<p><b>V9.50-VolumeControl</b></p>
-<ul><li>新增功能：在「播放選項」中新增了觸發媒體的音量控制滑塊和數字框。</li></ul>
-"""
+    <p><b>V9.52-DataManagers</b></p>
+    <ul>
+      <li>重構：新增資料管理器（SettingsManager / LayoutsManager / LibraryManager / ThemeManager），
+      將所有檔案 I/O 從 MainWindow 中抽離，統一管理。</li>
+    </ul>
+    <p><b>V9.51-DedupeFix</b></p>
+    <ul><li>修復 Bug：修正了事件去重功能因缺少屬性初始化而導致的 AttributeError。</li></ul>
+    <p><b>V9.50-VolumeControl</b></p>
+    <ul><li>新增功能：在「播放選項」中新增了觸發媒體的音量控制滑塊和數字框。</li></ul>
+    """
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Overlay UltraLite - V9.51 (Dedupe Fix)")
+        self.setWindowTitle("Overlay UltraLite - V9.52 (Data Managers)")
         self.setGeometry(100, 100, 1200, 800)
 
         # --- 1. 初始化所有屬性 ---
-        self.layouts = self._load_layouts()
+        self.layouts_mgr = LayoutsManager(self.LAYOUT_FILE)
+        self.layouts = self.layouts_mgr.load()
+
+        self.settings_mgr = SettingsManager(self.GIFT_MAP_FILE)
+        self.library_mgr = LibraryManager(self.LIBRARY_FILE)
+        self.theme_mgr = ThemeManager(self.THEME_FILE)
+
         self.queue = PlayQueueFIFO(maxlen=500)
         self.player_state = PlayerState.IDLE
         self.current_job_path: Optional[str] = None
@@ -1493,17 +1505,11 @@ class MainWindow(QMainWindow):
 
     # ==================== 主題設定相關方法 ====================
     def _load_theme(self):
-        if os.path.exists(self.THEME_FILE):
-            try:
-                with open(self.THEME_FILE, "r", encoding="utf-8") as f:
-                    self.theme_settings = json.load(f)
-            except (IOError, json.JSONDecodeError):
-                self._reset_theme()
-        else:
-            self._reset_theme()
+        self.theme_settings = self.theme_mgr.load_theme()
 
     def _save_theme(self):
         try:
+            # 收集 UI 值並存檔
             self.theme_settings["background_color"] = self.bg_color_btn.text()
             self.theme_settings["text_color"] = self.text_color_btn.text()
             self.theme_settings["font_size"] = self.font_size_spinbox.value()
@@ -1511,24 +1517,14 @@ class MainWindow(QMainWindow):
             self.theme_settings["item_spacing"] = self.spacing_spinbox.value()
             self.theme_settings["counter_font_size"] = self.counter_font_size_spinbox.value()
             self.theme_settings["queue_counter_font_size"] = self.queue_counter_font_size_spinbox.value()
-
-            with open(self.THEME_FILE, "w", encoding="utf-8") as f:
-                json.dump(self.theme_settings, f, indent=2)
+            self.theme_mgr.save_theme(self.theme_settings)
             QMessageBox.information(self, "成功", "外觀設定已儲存！")
             self._apply_theme_to_menu()
         except IOError:
             QMessageBox.warning(self, "錯誤", f"無法儲存主題檔案至 {self.THEME_FILE}")
 
     def _reset_theme(self):
-        self.theme_settings = {
-            "background_color": "rgba(0, 0, 0, 180)",
-            "text_color": "white",
-            "font_size": 16,
-            "border_radius": 10,
-            "item_spacing": 10,
-            "counter_font_size": 20,
-            "queue_counter_font_size": 16
-        }
+        self.theme_settings = dict(ThemeManager.DEFAULT)
         if hasattr(self, 'bg_color_btn'):
             self._update_theme_tab_ui()
 
@@ -1786,39 +1782,12 @@ class MainWindow(QMainWindow):
             self.menu_overlay_window.show()
 
     def _load_layouts(self) -> LayoutsData:
-        try:
-            with open(self.LAYOUT_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            upgraded_data: LayoutsData = {}
-            for path, layout_info in data.items():
-                if "x" in layout_info:
-                    layout = layout_info
-                    if (all(k in layout for k in ["x", "y", "w", "h"]) and all(
-                            isinstance(layout[k], (int, float))
-                            and layout[k] >= 0 for k in ["x", "y", "w", "h"])):
-                        upgraded_data[path] = {"16:9": layout}
-                else:
-                    for aspect, layout in layout_info.items():
-                        if (all(k in layout for k in ["x", "y", "w", "h"])
-                                and all(
-                                    isinstance(layout[k], (int, float))
-                                    and layout[k] >= 0
-                                    for k in ["x", "y", "w", "h"])):
-                            upgraded_data.setdefault(path, {})[aspect] = layout
-            if len(upgraded_data) != len(data):
-                self._save_layouts(upgraded_data)
-            return upgraded_data
-        except (FileNotFoundError, json.JSONDecodeError):
-            return {}
+        # 與舊介面相容：回傳 dict，但實際由 LayoutsManager 管
+        return self.layouts_mgr.load()
 
     def _save_layouts(self, data: Optional[LayoutsData] = None):
-        try:
-            with open(self.LAYOUT_FILE, "w", encoding="utf-8") as f:
-                json.dump(data if data is not None else self.layouts,
-                          f,
-                          indent=2)
-        except IOError:
-            self._log(f"錯誤: 無法儲存版面檔案 {self.LAYOUT_FILE}")
+        # 寫入指定資料或目前 self.layouts
+        self.layouts_mgr.save(data if data is not None else self.layouts)
 
     def _toggle_overlay_window(self):
         if self.overlay_window.isVisible():
@@ -2007,8 +1976,7 @@ class MainWindow(QMainWindow):
     def _auto_save_library(self):
         try:
             items = [self.lib_list.item(i).text() for i in range(self.lib_list.count())]
-            with open(self.LIBRARY_FILE, "w", encoding="utf-8") as f:
-                json.dump(items, f)
+            self.library_mgr.save_list(items)
         except IOError as e:
             self._log(f"錯誤: 無法自動儲存媒體清單到 {self.LIBRARY_FILE}: {e}")
 
@@ -2016,10 +1984,9 @@ class MainWindow(QMainWindow):
         if not os.path.exists(self.LIBRARY_FILE):
             return
         try:
-            with open(self.LIBRARY_FILE, "r", encoding="utf-8") as f:
-                items = json.load(f)
-                if isinstance(items, list):
-                    self.lib_list.addItems(items)
+            items = self.library_mgr.load_list()
+            if isinstance(items, list):
+                self.lib_list.addItems(items)
         except (IOError, json.JSONDecodeError) as e:
             self._log(f"錯誤: 無法自動載入媒體清單從 {self.LIBRARY_FILE}: {e}")
 
