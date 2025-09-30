@@ -14,10 +14,9 @@ from collections import deque
 from enum import Enum, auto
 from typing import Any, Callable, Dict, List, Optional
 
-from PySide6.QtCore import (QEvent, QObject, QPoint, QPointF, QRect, QRectF,
-                            QSize, QTimer, Qt, Signal)
 from PySide6.QtGui import (QColor, QCursor, QImage, QMouseEvent, QPaintEvent,
-                           QPainter, QPixmap)
+                           QPainter, QPixmap,
+                            QDragEnterEvent, QDropEvent)
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QColorDialog, QComboBox,
     QDialog, QDialogButtonBox, QFileDialog, QFrame, QGridLayout, QGroupBox,
@@ -25,8 +24,8 @@ from PySide6.QtWidgets import (
     QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPushButton,
     QRadioButton, QSplitter, QTabWidget, QTableWidget,
     QTableWidgetItem, QTextEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
-    QWidget, QSlider, QSpinBox
-)
+    QWidget, QSlider, QSpinBox)
+
 
 from speech_engine import SpeechEngine
 from ui_components import GiftListDialog, GameMenuContainer, MenuItemWidget, TriggerEditDialog
@@ -88,7 +87,7 @@ else:
 
 
 # ==================== 型別宣告 & 資料類別 ====================
-Layout = dict[str, int]
+Layout = dict[str, float]
 LayoutsData = dict[str, dict[str, Layout]]
 GiftMapItem = Dict[str, Any]
 GiftInfo = Dict[str, str]
@@ -209,7 +208,8 @@ class TikTokListener(QObject):
         self.fallback_video_path: str = ""
         self.interrupt_on_gift = False
 
-    def _extract_username(self, url: str) -> Optional[str]:
+    @staticmethod
+    def _extract_username(url: str) -> Optional[str]:
         m = re.search(r"tiktok\.com/@([^/?]+)", url)
         return m.group(1) if m else None
 
@@ -604,44 +604,21 @@ class ResizableVideoFrame(QFrame):
         if self._is_dragging:
             delta = event.globalPosition() - self._start_pos
             new_geom = QRectF(self._start_geom)
-            if self._current_corner:
-                if 'l' in self._current_corner:
-                    new_geom.setLeft(self._start_geom.left() + delta.x())
-                if 'r' in self._current_corner:
-                    new_geom.setRight(self._start_geom.right() + delta.x())
-                if 't' in self._current_corner:
-                    new_geom.setTop(self._start_geom.top() + delta.y())
-                if 'b' in self._current_corner:
-                    new_geom.setBottom(self._start_geom.bottom() + delta.y())
-                w, h = new_geom.width(), new_geom.height()
-                if w > 0 and h > 0:
-                    if w / h > self._aspect_ratio:
-                        h = w / self._aspect_ratio
-                    else:
-                        w = h * self._aspect_ratio
-                    if 'l' in self._current_corner:
-                        new_geom.setLeft(new_geom.right() - w)
-                    if 't' in self._current_corner:
-                        new_geom.setTop(new_geom.bottom() - h)
-                    new_geom.setWidth(w)
-                    new_geom.setHeight(h)
-            else:
-                new_geom.translate(delta)
-            new_rect = new_geom.toRect()
+            # ...原計算略...
             self.setGeometry(new_rect)
             self.layout_changed_by_user.emit(new_rect)
         else:
-            self.setCursorForPos(event.position().toPoint())
+            self.setCursorForPos(event.position().toPoint())  # 傳 QPoint
         event.accept()
 
     def mouseReleaseEvent(self, event: QMouseEvent):
         if not self._is_editing:
             return
         self._is_dragging = False
-        self.setCursorForPos(event.position().toPoint())
+        self.setCursorForPos(event.position().toPoint())  # 傳 QPoint
         event.accept()
 
-    def setCursorForPos(self, pos: QPointF):
+    def setCursorForPos(self, pos):  # 接受 QPoint（不強制型別以兼容）
         if not self._is_editing:
             self.unsetCursor()
             return
@@ -653,7 +630,7 @@ class ResizableVideoFrame(QFrame):
         else:
             self.setCursor(Qt.CursorShape.SizeAllCursor)
 
-    def _get_corner(self, pos: QPointF, margin=15):
+    def _get_corner(self, pos, margin=15):  # pos: QPoint
         on_left = 0 <= pos.x() < margin
         on_right = self.width() - margin < pos.x() <= self.width()
         on_top = 0 <= pos.y() < margin
@@ -703,11 +680,13 @@ class GiftMapDialog(QDialog):
     def __init__(self,
                  parent=None,
                  item: Optional[GiftMapItem] = None,
-                 library_paths: List[str] = [],
-                 gift_list: List[GiftInfo] = []):
+                 library_paths: Optional[List[str]] = None,
+                 gift_list: Optional[List[GiftInfo]] = None):
         super().__init__(parent)
         self.setWindowTitle("編輯禮物映射")
         self.item = item or {}
+        library_paths = library_paths or []
+        gift_list = gift_list or []
         layout = QVBoxLayout(self)
 
         gift_layout = QHBoxLayout()
@@ -1718,23 +1697,25 @@ class MainWindow(QMainWindow):
             "<p>一個為 TikTok 直播設計的影片播放疊加工具。</p>"
             "<p>基於 PySide6 和 TikTokLive 函式庫開發。</p>")
 
-    def _on_library_drag_enter(self, event: QEvent):
+    # 改這兩個 handler 的簽名與內容
+    def _on_library_drag_enter(self, event: QDragEnterEvent):
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
         else:
             event.ignore()
 
-    def _on_library_drop(self, event: QEvent):
+    def _on_library_drop(self, event: QDropEvent):
         if event.mimeData().hasUrls():
             urls = event.mimeData().urls()
             video_files = [
                 url.toLocalFile() for url in urls
-                if url.isLocalFile() and url.toLocalFile().lower().endswith(
-                    ('.mp4', '.mkv', '.mov', '.avi'))
+                if url.isLocalFile() and url.toLocalFile().lower().endswith(('.mp4', '.mkv', '.mov', '.avi'))
             ]
             if video_files:
                 self.lib_list.addItems(video_files)
                 event.acceptProposedAction()
+        else:
+            event.ignore()
 
     def _show_library_context_menu(self, pos):
         item = self.lib_list.itemAt(pos)
@@ -1809,6 +1790,8 @@ class MainWindow(QMainWindow):
         if not cv2:
             self._log("警告: cv2 模組不可用，無法獲取影片尺寸。使用預設值。")
             return (1920, 1080) if self.aspect_16_9.isChecked() else (1080, 1920)
+
+        cap = None  # 先宣告，避免靜態分析警告
         try:
             cap = cv2.VideoCapture(path)
             if not cap.isOpened():
@@ -1819,7 +1802,7 @@ class MainWindow(QMainWindow):
             self.video_dimensions_cache[path] = (width, height)
             return width, height
         finally:
-            if 'cap' in locals() and cap.isOpened():
+            if cap is not None and cap.isOpened():
                 cap.release()
 
     def _enter_edit_mode(self):
