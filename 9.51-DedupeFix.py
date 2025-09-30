@@ -766,15 +766,17 @@ class GiftMapDialog(QDialog):
 class GiftsTab(QWidget):
     """
     封裝「TikTok 禮物設定」分頁的 UI 與互動邏輯。
-    放在同一檔案，免外部依賴；MainWindow 透過此類存取設定。
+    改為持有 main_window 的參考，避免使用 parent() 造成 QStackedWidget 問題。
     """
     def __init__(self,
+                 main_window: 'MainWindow',
                  tiktok_listener: TikTokListener,
                  gift_manager: GiftManager,
                  get_library_paths: Callable[[], List[str]],
                  log_func: Callable[[str], None],
                  parent: Optional[QWidget] = None):
         super().__init__(parent)
+        self.main = main_window               # 新增：保存 MainWindow 參考
         self.listener = tiktok_listener
         self.gift_manager = gift_manager
         self.get_library_paths = get_library_paths
@@ -883,7 +885,7 @@ class GiftsTab(QWidget):
         btn_add_gift.clicked.connect(self._add_gift_map)
         btn_edit_gift.clicked.connect(self._edit_gift_map)
         btn_del_gift.clicked.connect(self._remove_gift_map)
-        btn_manage_gifts.clicked.connect(lambda: self.parent()._manage_gift_list())
+        btn_manage_gifts.clicked.connect(lambda: self.main._manage_gift_list())   # 改用 self.main
         btn_pick_fallback.clicked.connect(self._pick_fallback_video)
 
     # ----- GiftsTab 內部邏輯 -----
@@ -938,7 +940,7 @@ class GiftsTab(QWidget):
                 return
             self.listener.gift_map.append(new_data)
             self._refresh_gift_tree()
-            self.parent()._save_gift_map()
+            self.main._save_gift_map()          # 改用 self.main
 
     def _edit_gift_map(self):
         selected = self.gift_tree.currentItem()
@@ -964,7 +966,7 @@ class GiftsTab(QWidget):
                 return
             self.listener.gift_map[index] = updated_data
             self._refresh_gift_tree()
-            self.parent()._save_gift_map()
+            self.main._save_gift_map()          # 改用 self.main
 
     def _remove_gift_map(self):
         selected = self.gift_tree.currentItem()
@@ -973,12 +975,11 @@ class GiftsTab(QWidget):
             return
         index = self.gift_tree.indexOfTopLevelItem(selected)
         if index >= 0:
-            reply = QMessageBox.question(
-                self, "確認刪除", f"確定要刪除「{selected.text(0)}」這個映射嗎？")
+            reply = QMessageBox.question(self, "確認刪除", f"確定要刪除「{selected.text(0)}」這個映射嗎？")
             if reply == QMessageBox.StandardButton.Yes:
                 del self.listener.gift_map[index]
                 self._refresh_gift_tree()
-                self.parent()._save_gift_map()
+                self.main._save_gift_map()      # 改用 self.main
 
     def _pick_fallback_video(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -986,7 +987,7 @@ class GiftsTab(QWidget):
         if path:
             self.fallback_video_entry.setText(path)
             self.listener.fallback_video_path = path
-            self.parent()._save_gift_map()
+            self.main._save_gift_map()          # 改用 self.main
 
     def _on_gift_tree_double_clicked(self, item: QTreeWidgetItem, _):
         index = self.gift_tree.indexOfTopLevelItem(item)
@@ -1002,12 +1003,12 @@ class GiftsTab(QWidget):
             1, 1, 999, 1
         )
         if ok:
-            self.parent()._enqueue_video_from_gift(path, False, count)
+            self.main._enqueue_video_from_gift(path, False, count)   # 改用 self.main
             self._log(f"已手動將「{os.path.basename(path)}」加入待播清單 {count} 次，並更新計數。")
 
     def _on_volume_changed(self, value: int):
         self.playback_volume = value
-        self.parent()._on_volume_changed(value)
+        self.main._on_volume_changed(value)     # 改用 self.main
 
     # 讓 MainWindow 呼叫以同步/持久化
     def load_settings(self, data: dict):
@@ -1166,13 +1167,13 @@ class MainWindow(QMainWindow):
 
         # Center Tabs
         self.tab_library = QWidget()
-        # 使用 GiftsTab（新的封裝）
         self.tab_gifts = GiftsTab(
+            main_window=self,  # 這行是關鍵：把 MainWindow 傳給 GiftsTab
             tiktok_listener=self.tiktok_listener,
             gift_manager=self.gift_manager,
             get_library_paths=lambda: [self.lib_list.item(i).text() for i in range(self.lib_list.count())],
             log_func=self._log,
-            parent=self
+            parent=self.tabs  # 可設為 self.tabs 或不設，均可
         )
         self.tab_triggers = QWidget()
         self.tab_log = QWidget()
