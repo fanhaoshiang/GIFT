@@ -10,7 +10,7 @@ TikTok Gift Sniffer GUI（專用設定檔版，不共用 gift_map.json）
   pip install PySide6 TikTokLive
 
 啟動:
-  python gift_sniffer_gui.py
+  python gift_sniffer.py
 """
 
 from __future__ import annotations
