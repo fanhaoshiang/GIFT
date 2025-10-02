@@ -1,16 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-TikTok Gift Sniffer GUI（專用設定檔版，不共用 gift_map.json）
-- EulerStream API Key 與監聽清單、視窗幾何等，都存到當前目錄的 gift_sniffer.json
-- 一次輸入一個 @username 或完整網址加入清單；可開始/停止/刪除
-- 可同時監聽多個目標（各自輸出 gifts_seen_<username>.json）
-- 匯出映射模板 gift_map_template.json（gid/kw/path）
+TikTok Gift Sniffer GUI（專用設定檔，不共用 gift_map.json）
+- 在 GUI 輸入 EulerStream API Key（保存到當前資料夾的 gift_sniffer.json）
+- 一次輸入一個 @username 或完整 TikTok 直播網址加入清單；可開始/停止/刪除
+- 可同時監聽多個目標，每個目標寫入 gifts_seen_<username>.json
+- 支援匯出 gift_map_template.json（包含 gid/kw/path）
 
-安裝:
+安裝：
   pip install PySide6 TikTokLive
 
-啟動:
-  python gift_sniffer_gui.py
+啟動：
+  python gift_sniffer.py
 """
 
 from __future__ import annotations
@@ -21,9 +21,11 @@ import os
 import re
 import sys
 import time
+from concurrent.futures import TimeoutError
 from dataclasses import dataclass
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 
+# PySide6
 from PySide6.QtCore import Qt, QThread, Signal, Slot, QByteArray
 from PySide6.QtWidgets import (
     QApplication,
@@ -43,50 +45,44 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
 )
 
-# --- 相容多版本的 TikTokLive 匯入（建議 6.6.1） ---
+# TikTokLive（以防環境缺模組，做防呆）
 try:
-    from TikTokLive import TikTokLiveClient
-    from TikTokLive.events import GiftEvent, ConnectEvent, DisconnectEvent
-    try:
-        # 常見於 6.6.x
-        from TikTokLive.client.sign import EulerStreamSigner  # type: ignore
-    except Exception:
-        try:
-            from TikTokLive.client.web.sign import EulerStreamSigner  # type: ignore
-        except Exception:
-            try:
-                from TikTokLive.client.signer import EulerStreamSigner  # type: ignore
-            except Exception:
-                EulerStreamSigner = None  # type: ignore
+    from TikTokLive import TikTokLiveClient  # type: ignore
+    from TikTokLive.events import GiftEvent, ConnectEvent, DisconnectEvent  # type: ignore
 except Exception:
     TikTokLiveClient = None  # type: ignore
     GiftEvent = None  # type: ignore
     ConnectEvent = None  # type: ignore
     DisconnectEvent = None  # type: ignore
-    EulerStreamSigner = None  # type: ignore
 
 
-# --- username 擷取（與 9.52 同等邏輯） ---
-def parse_username(url_or_username: str) -> Optional[str]:
-    """
-    接受完整網址/@username/username，回傳 username
-    regex：tiktok.com/@<name>
-    """
-    s = (url_or_username or "").strip()
-    if not s:
-        return None
-    m = re.search(r"tiktok\.com/@([^/?]+)", s, re.IGNORECASE)
-    if m:
-        return m.group(1)
-    if s.startswith("@"):
-        return s[1:]
-    # 去尾部多餘路徑
-    s = s.split("/")[0]
-    return s or None
+# 依照你環境（6.6.1）的檔案清單，簽名器位於 TikTokLive.client.web.web_signer
+# 為了相容其他安裝，動態解析簽名器（找不到就提示）
+def resolve_euler_signer() -> Tuple[Optional[type], Optional[str]]:
+    try:
+        from importlib import import_module
+    except Exception:
+        return None, None
+
+    candidates = (
+        "TikTokLive.client.web.web_signer",  # 你的環境有這個
+        "TikTokLive.client.sign",
+        "TikTokLive.client.web.sign",
+        "TikTokLive.client.signer",
+    )
+    for mod in candidates:
+        try:
+            m = import_module(mod)
+            if hasattr(m, "TikTokSigner"):
+                return getattr(m, "TikTokSigner"), mod
+        except Exception:
+            continue
+    return None, None
 
 
-# --- 本工具專用設定（存放於當前資料夾） ---
+# ------------ 工具/存檔 ------------
 CFG_FILE = os.path.join(os.getcwd(), "gift_sniffer.json")
+
 
 def load_config() -> Dict[str, Any]:
     try:
@@ -97,12 +93,34 @@ def load_config() -> Dict[str, Any]:
         pass
     return {}
 
+
 def save_config(cfg: Dict[str, Any]) -> None:
     try:
         with open(CFG_FILE, "w", encoding="utf-8") as f:
             json.dump(cfg, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
+
+
+def parse_username(url_or_username: str) -> Optional[str]:
+    """
+    接受完整網址/@username/username，回傳 username
+    支援：
+      - https://www.tiktok.com/@name/live
+      - @name
+      - name
+    """
+    s = (url_or_username or "").strip()
+    if not s:
+        return None
+    m = re.search(r"tiktok\.com/@([^/?]+)", s, re.IGNORECASE)
+    if m:
+        return m.group(1)
+    if s.startswith("@"):
+        return s[1:]
+    # 去除可能的尾部路徑
+    s = s.split("/")[0]
+    return s or None
 
 
 @dataclass
@@ -114,11 +132,11 @@ class Target:
 
 
 class GiftSnifferWorker(QThread):
-    # 帶 username 的訊號
-    status = Signal(str, str)   # username, message
-    error = Signal(str, str)    # username, message
-    gift_seen = Signal(str, dict)  # username, payload
-    finished_ok = Signal(str)   # username
+    # 帶 username 的訊號，方便對應行
+    status = Signal(str, str)     # username, message
+    error = Signal(str, str)      # username, message
+    gift_seen = Signal(str, dict) # username, payload
+    finished_ok = Signal(str)     # username
 
     def __init__(self, username: str, out_path: str, api_key: str):
         super().__init__()
@@ -130,7 +148,7 @@ class GiftSnifferWorker(QThread):
         self._seen: Dict[str, Dict[str, Any]] = {}
         self._stop_requested = False
 
-        # 載入既有檔
+        # 載入既有 gifts_seen 檔（若存在）
         if os.path.exists(self.out_path):
             try:
                 with open(self.out_path, "r", encoding="utf-8") as f:
@@ -140,7 +158,7 @@ class GiftSnifferWorker(QThread):
             except Exception:
                 self._seen = {}
 
-    def _save(self):
+    def _save_seen(self):
         try:
             os.makedirs(os.path.dirname(self.out_path) or ".", exist_ok=True)
             with open(self.out_path, "w", encoding="utf-8") as f:
@@ -152,10 +170,12 @@ class GiftSnifferWorker(QThread):
         self._stop_requested = True
         if self._client and self._loop and self._loop.is_running():
             try:
-                fut = asyncio.run_coroutine_threadsafe(self._client.stop(), self._loop)
-                fut.result(timeout=5)
-            except Exception:
-                pass
+                future = asyncio.run_coroutine_threadsafe(self._client.stop(), self._loop)
+                future.result(timeout=5)  # 等待停止完成，最多5秒
+            except TimeoutError:
+                self.error.emit(self.username, "停止操作超時")
+            except Exception as e:
+                self.error.emit(self.username, f"停止時發生錯誤: {e}")
 
     def _update_seen(self, gift_id: str, gift_name: str, count: int):
         key = gift_id or gift_name.lower()
@@ -172,31 +192,39 @@ class GiftSnifferWorker(QThread):
         it["count_total"] = int(it.get("count_total", 0)) + max(1, int(count))
         it["last_seen_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
         self._seen[key] = it
-        self._save()
+        self._save_seen()
         self.gift_seen.emit(self.username, it)
 
     def run(self):
+        # 基本檢查
         if TikTokLiveClient is None:
             self.error.emit(self.username, "未安裝 TikTokLive：請先 pip install TikTokLive")
             return
-        if EulerStreamSigner is None:
-            self.error.emit(self.username, "找不到 EulerStreamSigner，請更新 TikTokLive（建議 6.6.1）")
+
+        SignerClass, mod = resolve_euler_signer()
+        if SignerClass is None:
+            self.error.emit(self.username, "找不到 TikTokSigner，請更新 TikTokLive（或回報簽名器模組路徑）")
             return
+
         if not self.api_key:
-            self.error.emit(self.username, "未提供 EulerStream API Key，無法連線簽名服務")
+            self.error.emit(self.username, "未提供 API Key，無法連線簽名服務")
             return
+
         try:
+            # 在這個 Thread 內建立自己的 asyncio 事件圈
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             self._loop = loop
 
-            signer = EulerStreamSigner(api_key=self.api_key)
-            client = TikTokLiveClient(unique_id=self.username, sign_provider=signer)
+            signer_kwargs = {"sign_api_key": self.api_key}
+            web_kwargs = {"signer_kwargs": signer_kwargs}
+            client = TikTokLiveClient(unique_id=self.username, web_kwargs=web_kwargs)
             self._client = client
 
             @client.on(ConnectEvent)
             async def on_connect(_: ConnectEvent):
-                self.status.emit(self.username, f"已連線 @{self.username}")
+                # 可在此印出實際使用的簽名器模組，便於除錯
+                self.status.emit(self.username, f"已連線 @{self.username}（signer: {mod}）")
 
             @client.on(DisconnectEvent)
             async def on_disconnect(_: DisconnectEvent):
@@ -213,7 +241,7 @@ class GiftSnifferWorker(QThread):
                     self.error.emit(self.username, f"解析禮物事件失敗: {ee}")
 
             self.status.emit(self.username, f"連線 @{self.username} 中…")
-            client.run()
+            client.run()  # 阻塞直到 stop()
             self.finished_ok.emit(self.username)
         except Exception as e:
             self.error.emit(self.username, f"執行錯誤：{e}")
@@ -233,7 +261,7 @@ class MainWindow(QMainWindow):
         w = QWidget()
         root = QVBoxLayout(w)
 
-        # API Key 區塊（只存到 gift_sniffer.json，不觸碰 gift_map.json）
+        # API Key 區塊（只存到 gift_sniffer.json）
         box_api = QGroupBox("EulerStream API")
         api_layout = QHBoxLayout(box_api)
         api_layout.addWidget(QLabel("API Key："))
@@ -307,8 +335,16 @@ class MainWindow(QMainWindow):
         self.btn_stop_all.clicked.connect(lambda: self.stop_selected(stop_all=True))
         self.btn_export.clicked.connect(self.export_template_all)
 
-        # 載入設定（gift_sniffer.json）
+        # 載入設定
         self.load_ui_state()
+
+        if TikTokLiveClient is None:
+            QMessageBox.critical(self, "缺少模組", "未找到 TikTokLive 模組。\n請先執行 `pip install TikTokLive` 安裝。")
+            self.btn_add_one.setEnabled(False)
+            self.btn_start_sel.setEnabled(False)
+            self.btn_start_all.setEnabled(False)
+            self.target_input.setEnabled(False)
+            self.status_label.setText("錯誤：缺少 TikTokLive 模組")
 
     # ---------- 設定保存/恢復 ----------
     def load_ui_state(self):
@@ -366,6 +402,7 @@ class MainWindow(QMainWindow):
         self._append_target(username, out_file)
         self.target_input.clear()
         self.status_label.setText(f"已加入：{username}")
+        self.save_ui_state()
 
     def _append_target(self, username: str, out_path: str):
         row = self.table.rowCount()
@@ -411,7 +448,7 @@ class MainWindow(QMainWindow):
             # 重建索引
             self.row_by_username = {self.table.item(r, 0).text(): r for r in range(self.table.rowCount())}
         self.status_label.setText(f"已刪除 {removed} 個目標")
-
+        self.save_ui_state()
     # ---------- 啟停 ----------
     def _start_worker_for(self, username: str, out_path: str):
         if username in self.workers:
@@ -530,6 +567,7 @@ class MainWindow(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     win = MainWindow()
+
     # 從 gift_sniffer.json 還原視窗位置
     cfg = load_config()
     geom_b64 = cfg.get("geometry_b64")
@@ -539,8 +577,19 @@ def main():
             win.restoreGeometry(ba)
         except Exception:
             pass
+
     win.show()
-    sys.exit(app.exec())
+    rc = app.exec()
+
+    # 關閉時保存視窗位置
+    try:
+        cfg = load_config()
+        cfg["geometry_b64"] = bytes(win.saveGeometry().toBase64()).decode("ascii")
+        save_config(cfg)
+    except Exception:
+        pass
+
+    sys.exit(rc)
 
 
 if __name__ == "__main__":
