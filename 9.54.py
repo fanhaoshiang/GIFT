@@ -13,6 +13,7 @@ import time
 from collections import deque
 from enum import Enum, auto
 from typing import Any, Callable, Dict, List, Optional
+from typing import Union
 
 from PySide6.QtGui import (QColor, QCursor, QImage, QMouseEvent, QPaintEvent,
                            QPainter, QPixmap,
@@ -25,7 +26,7 @@ from PySide6.QtWidgets import (
     QRadioButton, QSplitter, QTabWidget, QTableWidget,
     QTableWidgetItem, QTextEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
     QWidget, QSlider, QSpinBox)
-from PySide6.QtCore import Signal, QObject, QRect, Qt, QPointF, QRectF, QTimer
+from PySide6.QtCore import Signal, QObject, QRect, Qt, QPointF, QRectF, QTimer, QPoint
 
 from speech_engine import SpeechEngine
 from ui_components import GiftListDialog, GameMenuContainer, MenuItemWidget, TriggerEditDialog
@@ -75,7 +76,13 @@ try:
 except ImportError:
     pyttsx3 = None
     _HAS_TTS = False
-
+# --- Aho-Corasick 依賴（多關鍵字高效比對）---
+try:
+    import ahocorasick  # pip install pyahocorasick
+    _HAS_AHOCORASICK = True
+except ImportError:
+    ahocorasick = None
+    _HAS_AHOCORASICK = False
 # --- 處理打包路徑的核心程式碼 ---
 if getattr(sys, 'frozen', False):
     # 如果是在打包後的環境中運行
@@ -609,29 +616,20 @@ class ResizableVideoFrame(QFrame):
             self.setGeometry(new_rect)
             self.layout_changed_by_user.emit(new_rect)
         else:
-            self.setCursorForPos(event.position().toPoint())  # 傳 QPoint
+            # 使用 snake_case
+            self.set_cursor_for_pos(event.position())
         event.accept()
 
     def mouseReleaseEvent(self, event: QMouseEvent):
         if not self._is_editing:
             return
         self._is_dragging = False
-        self.setCursorForPos(event.position().toPoint())  # 傳 QPoint
+        # 使用 snake_case
+        self.set_cursor_for_pos(event.position())
         event.accept()
 
-    def setCursorForPos(self, pos):  # 接受 QPoint（不強制型別以兼容）
-        if not self._is_editing:
-            self.unsetCursor()
-            return
-        corner = self._get_corner(pos)
-        if corner in ['tl', 'br']:
-            self.setCursor(Qt.CursorShape.SizeFDiagCursor)
-        elif corner in ['tr', 'bl']:
-            self.setCursor(Qt.CursorShape.SizeBDiagCursor)
-        else:
-            self.setCursor(Qt.CursorShape.SizeAllCursor)
 
-    def _get_corner(self, pos, margin=15):  # pos: QPoint
+    def _get_corner(self, pos: QPoint, margin: int = 15) -> str:  # pos: QPoint
         on_left = 0 <= pos.x() < margin
         on_right = self.width() - margin < pos.x() <= self.width()
         on_top = 0 <= pos.y() < margin
@@ -646,17 +644,44 @@ class ResizableVideoFrame(QFrame):
             return 'br'
         return ""
 
+    def set_cursor_for_pos(self, pos: Union[QPoint, QPointF, tuple[int, int]]) -> None:
+        if not self._is_editing:
+            self.unsetCursor()
+            return
+
+        # 統一轉為 QPoint
+        if isinstance(pos, QPointF):
+            pos = pos.toPoint()
+        elif isinstance(pos, tuple):
+            pos = QPoint(pos[0], pos[1])
+
+        corner = self._get_corner(pos)
+        if corner in ('tl', 'br'):
+            self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+        elif corner in ('tr', 'bl'):
+            self.setCursor(Qt.CursorShape.SizeBDiagCursor)
+        else:
+            self.setCursor(Qt.CursorShape.SizeAllCursor)
+
+    # 相容舊名稱（只保留這個極短委派別名，並抑制命名檢查）
+    # noinspection PyPep8Naming
+    def setCursorForPos(self, pos):  # noqa: N802
+        self.set_cursor_for_pos(pos)
+
 
 # ==================== Overlay 視窗 ===================
 class OverlayWindow(QWidget):
-    def __init__(self, main_window: 'MainWindow', parent=None):
+    def __init__(self, owner: 'MainWindow', parent=None):
         super().__init__(parent)
-        self.main_window = main_window
+
+        self.main_window = owner
         self.setWindowTitle("影片 Overlay 播放視窗")
-        self.setWindowFlags(Qt.WindowType.Window
-                            | Qt.WindowType.WindowTitleHint
-                            | Qt.WindowType.CustomizeWindowHint
-                            | Qt.WindowType.WindowCloseButtonHint)
+        self.setWindowFlags(
+            Qt.WindowType.Window
+            | Qt.WindowType.WindowTitleHint
+            | Qt.WindowType.CustomizeWindowHint
+            | Qt.WindowType.WindowCloseButtonHint
+        )
         self.setStyleSheet("background-color: rgba(0, 255, 0, 80);")
 
 
@@ -723,8 +748,17 @@ class GiftMapDialog(QDialog):
         path_layout.addWidget(self.path_combo)
         layout.addLayout(path_layout)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
-                                   | QDialogButtonBox.StandardButton.Cancel)
+        buttons = QDialogButtonBox(self)
+
+        # 逐一加入標準按鈕，QDialogButtonBox 會自動賦予正確角色
+        ok_btn = buttons.addButton(QDialogButtonBox.StandardButton.Ok)
+        cancel_btn = buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
+
+        # 體驗最佳化：Enter 預設觸發 OK；Esc 預設觸發 reject（Qt 也會處理 Esc）
+        ok_btn.setDefault(True)
+        ok_btn.setAutoDefault(True)
+        cancel_btn.setAutoDefault(False)
+
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
@@ -750,14 +784,14 @@ class GiftsTab(QWidget):
     改為持有 main_window 的參考，避免使用 parent() 造成 QStackedWidget 問題。
     """
     def __init__(self,
-                 main_window: 'MainWindow',
+                 owner: 'MainWindow',
                  tiktok_listener: TikTokListener,
                  gift_manager: GiftManager,
                  get_library_paths: Callable[[], List[str]],
                  log_func: Callable[[str], None],
                  parent: Optional[QWidget] = None):
         super().__init__(parent)
-        self.main = main_window               # 新增：保存 MainWindow 參考
+        self.main = owner               # 新增：保存 MainWindow 參考
         self.listener = tiktok_listener
         self.gift_manager = gift_manager
         self.get_library_paths = get_library_paths
@@ -1014,7 +1048,34 @@ class GiftsTab(QWidget):
             "playback_volume": self.playback_volume
         }
 
+class LibraryListWidget(QListWidget):
+    # 拖入的檔案清單會透過這個訊號丟給外部（MainWindow）
+    filesDropped = Signal(list)
 
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self.setDragDropMode(QListWidget.DragDropMode.NoDragDrop)
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        if event.mimeData().hasUrls():
+            urls = event.mimeData().urls()
+            exts = ('.mp4', '.mkv', '.mov', '.avi')
+            files = [
+                url.toLocalFile() for url in urls
+                if url.isLocalFile() and url.toLocalFile().lower().endswith(exts)
+            ]
+            if files:
+                self.filesDropped.emit(files)
+                event.acceptProposedAction()
+                return
+        event.ignore()
 # ==================== 主 GUI 應用 ===================
 class MainWindow(QMainWindow):
     LAYOUT_FILE = os.path.join(application_path, "layouts.json")
@@ -1039,6 +1100,9 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
+        self._ac = None  # Aho-Corasick automaton (若可用)
+        self._trigger_by_keyword = {}  # keyword(lower) -> trigger dict
+        self._trigger_regex = None  # 回退方案：單一正則（alternation）
         self.setWindowTitle("Overlay UltraLite - V9.52 (Data Managers)")
         self.setGeometry(100, 100, 1200, 800)
 
@@ -1090,12 +1154,62 @@ class MainWindow(QMainWindow):
         self.viewer_list_updater.start(5000)
         self.log_write_timer.start(5000)
         self.tts_queue_refresh_timer.start(1000)
-        self.queue_count_update_timer.start(1000)
+        #self.queue_count_update_timer.start(1000)
 
         self._check_for_first_run()
+        self._rebuild_trigger_matcher()
+
+    def _rebuild_trigger_matcher(self):
+        # 蒐集所有關鍵字（小寫），同時建立 keyword -> trigger 的映射
+        self._trigger_by_keyword = {}
+        keywords = []
+        for trig in self.trigger_manager.get_all_triggers():
+            kw = (trig.get("keyword") or "").strip()
+            if kw:
+                k = kw.lower()
+                # 若有多條相同關鍵字，保留第一條或最後一條皆可；這裡以「第一條」為準
+                if k not in self._trigger_by_keyword:
+                    self._trigger_by_keyword[k] = trig
+                    keywords.append(k)
+
+        # 預設清空舊的結構
+        self._ac = None
+        self._trigger_regex = None
+
+        # 優先使用 Aho-Corasick
+        if _HAS_AHOCORASICK and keywords:
+            try:
+                A = ahocorasick.Automaton()
+                # 使用 set 避免重複插入
+                for k in set(keywords):
+                    A.add_word(k, k)  # 存 payload 為關鍵字本身
+                A.make_automaton()
+                self._ac = A
+                return
+            except Exception:
+                # 若建構失敗，回退到正則方案
+                self._ac = None
+
+        # 回退方案：將所有關鍵字用 alternation 編成一條正則
+        if keywords:
+            # 為避免 catastrophic backtracking，先依長度由長到短排序
+            parts = [re.escape(k) for k in sorted(set(keywords), key=len, reverse=True)]
+            pattern = "|".join(parts)
+            try:
+                self._trigger_regex = re.compile(pattern, re.IGNORECASE)
+            except re.error:
+                # 正則建置失敗則放棄（極少見），最終會回到逐一掃描（不建議）
+                self._trigger_regex = None
+
+    def _on_library_files_dropped(self, files: List[str]) -> None:
+        if files:
+            self.lib_list.addItems(files)
+            # 如果希望拖放後立即儲存清單，可保留這行；不需要可刪掉
+            self._auto_save_library()
 
     def _setup_connections(self):
         """將所有信號連接集中在此"""
+        self.queue.queue_changed.connect(self._update_queue_counts_in_menu)
         # 佇列信號
         self.queue.monitor_signal.connect(self._write_to_monitor)
         self.queue.queue_changed.connect(self._refresh_queue_view)
@@ -1109,7 +1223,7 @@ class MainWindow(QMainWindow):
         self.log_write_timer.timeout.connect(self._flush_log_buffer_to_file)
         self.viewer_list_updater.timeout.connect(self._update_viewer_list)
         self.tts_queue_refresh_timer.timeout.connect(self._refresh_tts_queue_view)
-        self.queue_count_update_timer.timeout.connect(self._update_queue_counts_in_menu)
+        #self.queue_count_update_timer.timeout.connect(self._update_queue_counts_in_menu)
 
     def _setup_ui(self):
         # --- Menu Bar ---
@@ -1160,7 +1274,7 @@ class MainWindow(QMainWindow):
         # Center Tabs
         self.tab_library = QWidget()
         self.tab_gifts = GiftsTab(
-            main_window=self,  # 這行是關鍵：把 MainWindow 傳給 GiftsTab
+            owner=self,  # 這行是關鍵：把 MainWindow 傳給 GiftsTab
             tiktok_listener=self.tiktok_listener,
             gift_manager=self.gift_manager,
             get_library_paths=lambda: [self.lib_list.item(i).text() for i in range(self.lib_list.count())],
@@ -1289,22 +1403,26 @@ class MainWindow(QMainWindow):
         snapshot = self.speech_engine.snapshot()
         current_items = [self.tts_q_list.item(i).text() for i in range(self.tts_q_list.count())]
         if current_items != snapshot:
+            self.tts_q_list.setUpdatesEnabled(False)
             self.tts_q_list.clear()
             self.tts_q_list.addItems(snapshot)
+            self.tts_q_list.setUpdatesEnabled(True)
 
     def _setup_library_tab(self, parent):
         layout = QVBoxLayout(parent)
         lib_box = QGroupBox("媒体清单 (可拖放檔案至此)")
         lib_box_layout = QHBoxLayout(lib_box)
 
-        self.lib_list = QListWidget()
+        # 使用自訂的 LibraryListWidget（取代原本的 QListWidget）
+        self.lib_list = LibraryListWidget()
         self.lib_list.itemDoubleClicked.connect(self._enqueue_selected_from_library)
-        self.lib_list.setAcceptDrops(True)
-        self.lib_list.setDragDropMode(QListWidget.DragDropMode.NoDragDrop)
-        self.lib_list.dragEnterEvent = self._on_library_drag_enter
-        self.lib_list.dropEvent = self._on_library_drop
+        # 接收拖放完成的檔案清單
+        self.lib_list.filesDropped.connect(self._on_library_files_dropped)
+
+        # 保留右鍵選單與其它設定
         self.lib_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.lib_list.customContextMenuRequested.connect(self._show_library_context_menu)
+
         lib_box_layout.addWidget(self.lib_list)
 
         lib_btn_widget = QWidget()
@@ -1326,7 +1444,8 @@ class MainWindow(QMainWindow):
         btn_load_list_from = QPushButton("从档案载入...")
         btn_load_list_from.clicked.connect(self._load_library_from)
 
-        for btn in [btn_add, btn_enqueue, btn_edit, btn_reset, btn_remove, btn_clear, btn_save_list_as, btn_load_list_from]:
+        for btn in [btn_add, btn_enqueue, btn_edit, btn_reset, btn_remove, btn_clear, btn_save_list_as,
+                    btn_load_list_from]:
             lib_btn_layout.addWidget(btn)
         lib_btn_layout.addStretch()
         lib_box_layout.addWidget(lib_btn_widget)
@@ -1387,6 +1506,7 @@ class MainWindow(QMainWindow):
             self.trigger_tree.addTopLevelItem(tree_item)
         self.trigger_tree.resizeColumnToContents(0)
 
+    # 在新增/更新/刪除觸發器後，呼叫重建（_add_trigger/_edit_trigger/_del_trigger 內）
     def _add_trigger(self):
         library_paths = [self.lib_list.item(i).text() for i in range(self.lib_list.count())]
         if not library_paths:
@@ -1400,6 +1520,7 @@ class MainWindow(QMainWindow):
                 return
             self.trigger_manager.add_trigger(new_data)
             self._refresh_trigger_tree()
+            self._rebuild_trigger_matcher()  # 新增：重建比對器
 
     def _edit_trigger(self):
         selected = self.trigger_tree.currentItem()
@@ -1413,11 +1534,13 @@ class MainWindow(QMainWindow):
         dialog = TriggerEditDialog(self, item=item_data, library_paths=library_paths)
         if dialog.exec():
             updated_data = dialog.get_data()
-            if not updated_data.get("keyword") or (not updated_data.get("path") and not updated_data.get("tts_response")):
+            if not updated_data.get("keyword") or (
+                    not updated_data.get("path") and not updated_data.get("tts_response")):
                 QMessageBox.warning(self, "提示", "關鍵字不能為空，且必須至少設定一個觸發動作（影片或朗讀）。")
                 return
             self.trigger_manager.update_trigger(index, updated_data)
             self._refresh_trigger_tree()
+            self._rebuild_trigger_matcher()  # 新增：重建比對器
 
     def _del_trigger(self):
         selected = self.trigger_tree.currentItem()
@@ -1429,6 +1552,7 @@ class MainWindow(QMainWindow):
         if reply == QMessageBox.StandardButton.Yes:
             self.trigger_manager.delete_trigger(index)
             self._refresh_trigger_tree()
+            self._rebuild_trigger_matcher()  # 新增：重建比對器
 
     def _setup_log_tab(self, parent):
         layout = QVBoxLayout(parent)
@@ -1612,30 +1736,31 @@ class MainWindow(QMainWindow):
                     self.path_to_gift_id_map[path] = gift_id
 
     def _update_queue_counts_in_menu(self):
-        if not self.game_menu_container:
+        if not self.game_menu_container or not self.menu_overlay_window.isVisible():
             return
 
+        # 1) 將佇列中的 path 直接彙總為 gift_id 計數
         queue_snapshot = self.queue.snapshot()
-        path_counts = {}
-        for path, note in queue_snapshot:
-            path_counts[path] = path_counts.get(path, 0) + 1
+        counts_by_gift: Dict[str, int] = {}
+        for path, _ in queue_snapshot:
+            gid = self.path_to_gift_id_map.get(path)
+            if gid:
+                counts_by_gift[gid] = counts_by_gift.get(gid, 0) + 1
 
-        if not self.menu_overlay_window.isVisible():
+        # 2) 如需避免不必要的 UI 重繪，可比對上次結果
+        if getattr(self, "_last_counts_by_gift", None) == counts_by_gift:
             return
+        self._last_counts_by_gift = counts_by_gift
 
+        # 3) 更新 UI（僅當菜單視窗可見）
         list_widget = self.game_menu_container.list_widget
+        show = self.show_queue_counter_checkbox.isChecked()
         for i in range(list_widget.count()):
             widget = list_widget.itemWidget(list_widget.item(i))
             if isinstance(widget, MenuItemWidget):
                 gift_id = widget.gift_info.get("id")
-
-                paths_for_this_gift = [
-                    path for path, gid in self.path_to_gift_id_map.items() if gid == gift_id
-                ]
-
-                total_count = sum(path_counts.get(p, 0) for p in paths_for_this_gift)
-
-                widget.set_queue_count(total_count, self.show_queue_counter_checkbox.isChecked())
+                new_count = counts_by_gift.get(gift_id, 0)
+                widget.set_queue_count(new_count, show)
 
     def _on_show_counter_toggled(self, checked: bool):
         if not self.game_menu_container or not self.menu_overlay_window.isVisible():
@@ -2227,26 +2352,52 @@ class MainWindow(QMainWindow):
         self.events_list.scrollToBottom()
         self._log_realtime_event(message)
 
+    # 抽出執行觸發細節（影片/朗讀）的共用方法
+    def _perform_trigger(self, trigger: dict) -> bool:
+        triggered = False
+
+        path = trigger.get("path")
+        if path and os.path.exists(path):
+            self._log(f"關鍵字觸發: '{trigger.get('keyword')}' -> 播放 {os.path.basename(path)}")
+            self.tiktok_listener.on_video_triggered.emit(path, False, 1)
+            triggered = True
+
+        tts_response = trigger.get("tts_response")
+        if tts_response:
+            self._log(f"關鍵字觸發: '{trigger.get('keyword')}' -> 朗讀 '{tts_response}'")
+            self.speech_engine.say(tts_response)
+            triggered = True
+
+        return triggered
     def _check_comment_for_triggers(self, comment: str):
-        comment_lower = comment.lower()
-        for trigger in self.trigger_manager.get_all_triggers():
-            keyword = trigger.get("keyword", "").lower()
-            if keyword and keyword in comment_lower:
-                triggered = False
+        if not comment:
+            return
 
-                path = trigger.get("path")
-                if path and os.path.exists(path):
-                    self._log(f"關鍵字觸發: '{trigger.get('keyword')}' -> 播放 {os.path.basename(path)}")
-                    self.tiktok_listener.on_video_triggered.emit(path, False, 1)
-                    triggered = True
+        text = comment.lower()
 
-                tts_response = trigger.get("tts_response")
-                if tts_response:
-                    self._log(f"關鍵字觸發: '{trigger.get('keyword')}' -> 朗讀 '{tts_response}'")
-                    self.speech_engine.say(tts_response)
-                    triggered = True
+        # 1) Aho-Corasick（最佳效能）
+        if self._ac is not None:
+            for _, matched_kw in self._ac.iter(text):
+                trig = self._trigger_by_keyword.get(matched_kw)
+                if trig and self._perform_trigger(trig):
+                    break  # 觸發成功即停止
+            return
 
-                if triggered:
+        # 2) 回退：單一正則（效能佳於逐一 substring）
+        if self._trigger_regex is not None:
+            m = self._trigger_regex.search(text)
+            if m:
+                kw = m.group(0).lower()
+                trig = self._trigger_by_keyword.get(kw)
+                if trig:
+                    self._perform_trigger(trig)
+            return
+
+        # 3) 最終回退：逐一 substring（避免完全失效）
+        for trig in self.trigger_manager.get_all_triggers():
+            kw = (trig.get("keyword") or "").lower()
+            if kw and kw in text:
+                if self._perform_trigger(trig):
                     break
 
     def _log_realtime_event(self, message: str):
