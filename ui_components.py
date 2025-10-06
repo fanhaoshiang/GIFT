@@ -166,130 +166,247 @@ class GiftEditor(QDialog):
 
 
 class GiftListDialog(QDialog):
-    def __init__(self, parent=None, gift_manager=None):
+    """
+    管理全局礼物清单的对话框。
+    (新版：增加了批次新增功能)
+    """
+
+    def __init__(self, parent: QWidget, gift_manager):
         super().__init__(parent)
         self.gift_manager = gift_manager
+        self.setWindowTitle("管理礼物清单")
+        self.setMinimumSize(800, 600)
 
-        try:
-            from main import application_path
-            predefined_gifts_path = os.path.join(application_path, "predefined_gifts.json")
-        except (ImportError, NameError):
-            predefined_gifts_path = "predefined_gifts.json"
+        main_layout = QHBoxLayout(self)
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        main_layout.addWidget(splitter)
 
-        self.predefined_gift_manager = PredefinedGiftManager(predefined_gifts_path)
-        self.setWindowTitle("礼物清单管理")
-        self.setMinimumSize(600, 400)
-        layout = QVBoxLayout(self)
+        # 左側：禮物列表
+        left_panel = QWidget()
+        left_layout = QVBoxLayout(left_panel)
+        self.gift_list_widget = QListWidget()
+        self.gift_list_widget.currentItemChanged.connect(self._on_selection_changed)
+        left_layout.addWidget(self.gift_list_widget)
+        splitter.addWidget(left_panel)
 
-        self.table = QTableWidget()
-        self.table.setColumnCount(5)
-        self.table.setHorizontalHeaderLabels(
-            ["中文名", "英文關鍵字", "禮物 ID", "圖片", "效果說明"])
-        self.table.horizontalHeader().setSectionResizeMode(
-            1, QHeaderView.ResizeMode.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(
-            4, QHeaderView.ResizeMode.Stretch)
-        self.table.setSelectionBehavior(
-            QAbstractItemView.SelectionBehavior.SelectRows)
-        layout.addWidget(self.table)
+        # 右側：編輯面板
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        self.edit_group = QGroupBox("编辑礼物资讯")
+        self.edit_group.setEnabled(False)
+        form_layout = QGridLayout(self.edit_group)
 
-        btn_layout = QHBoxLayout()
-        btn_add = QPushButton("新增")
-        btn_edit = QPushButton("编辑")
-        btn_del = QPushButton("删除")
-        btn_add.clicked.connect(self._add_item)
-        btn_edit.clicked.connect(self._edit_item)
-        btn_del.clicked.connect(self._del_item)
-        btn_layout.addStretch()
-        btn_layout.addWidget(btn_add)
-        btn_layout.addWidget(btn_edit)
-        btn_layout.addWidget(btn_del)
-        layout.addLayout(btn_layout)
+        form_layout.addWidget(QLabel("中文名称:"), 0, 0)
+        self.name_cn_edit = QLineEdit()
+        form_layout.addWidget(self.name_cn_edit, 0, 1)
 
-        self._refresh_table()
+        form_layout.addWidget(QLabel("英文关键字 (唯一):"), 1, 0)
+        self.name_en_edit = QLineEdit()
+        form_layout.addWidget(self.name_en_edit, 1, 1)
 
-    def _refresh_table(self):
-        self.table.setRowCount(0)
-        if not self.gift_manager:
+        form_layout.addWidget(QLabel("礼物 ID:"), 2, 0)
+        self.id_edit = QLineEdit()
+        form_layout.addWidget(self.id_edit, 2, 1)
+
+        form_layout.addWidget(QLabel("图片路径:"), 3, 0)
+        path_layout = QHBoxLayout()
+        self.image_path_edit = QLineEdit()
+        self.image_path_edit.setReadOnly(True)
+        btn_browse = QPushButton("...")
+        btn_browse.clicked.connect(self._browse_image)
+        path_layout.addWidget(self.image_path_edit)
+        path_layout.addWidget(btn_browse)
+        form_layout.addLayout(path_layout, 3, 1)
+
+        form_layout.addWidget(QLabel("说明文字:"), 4, 0)
+        self.description_edit = QLineEdit()
+        form_layout.addWidget(self.description_edit, 4, 1)
+
+        right_layout.addWidget(self.edit_group)
+        right_layout.addStretch()
+
+        # 按鈕區
+        button_layout = QHBoxLayout()
+        self.btn_add = QPushButton("新增礼物")
+        self.btn_add.clicked.connect(self._add_gift)
+
+        # --- 關鍵新增：批次新增按鈕 ---
+        self.btn_batch_add = QPushButton("批次新增 (檔名)")
+        self.btn_batch_add.setToolTip("一次選取多個圖片檔，自動使用檔名作為禮物名稱與ID")
+        self.btn_batch_add.clicked.connect(self._batch_add_from_filenames)
+
+        self.btn_save = QPushButton("儲存變更")
+        self.btn_save.clicked.connect(self._save_gift)
+        self.btn_save.setEnabled(False)
+        self.btn_delete = QPushButton("删除礼物")
+        self.btn_delete.clicked.connect(self._delete_gift)
+        self.btn_delete.setEnabled(False)
+
+        button_layout.addWidget(self.btn_add)
+        button_layout.addWidget(self.btn_batch_add)  # 將按鈕加入佈局
+        button_layout.addStretch()
+        button_layout.addWidget(self.btn_save)
+        button_layout.addWidget(self.btn_delete)
+        left_layout.addLayout(button_layout)
+
+        splitter.addWidget(right_panel)
+        splitter.setSizes([300, 500])
+
+        self._refresh_list()
+
+    def _refresh_list(self):
+        self.gift_list_widget.clear()
+        for gift in self.gift_manager.get_all_gifts():
+            display_text = f"{gift.get('name_cn', '')} ({gift.get('name_en', '')})"
+            item = QListWidgetItem(display_text)
+            item.setData(Qt.ItemDataRole.UserRole, gift)
+            self.gift_list_widget.addItem(item)
+        self._on_selection_changed(None, None)
+
+    def _on_selection_changed(self, current: Optional[QListWidgetItem], _):
+        if current:
+            gift_data = current.data(Qt.ItemDataRole.UserRole)
+            self.name_cn_edit.setText(gift_data.get("name_cn", ""))
+            self.name_en_edit.setText(gift_data.get("name_en", ""))
+            self.id_edit.setText(gift_data.get("id", ""))
+            self.image_path_edit.setText(gift_data.get("image_path", ""))
+            self.description_edit.setText(gift_data.get("description", ""))
+            self.edit_group.setEnabled(True)
+            self.btn_save.setEnabled(True)
+            self.btn_delete.setEnabled(True)
+            # 編輯時，讓英文名欄位不可更改，因為它是主鍵
+            self.name_en_edit.setReadOnly(True)
+        else:
+            self.name_cn_edit.clear()
+            self.name_en_edit.clear()
+            self.id_edit.clear()
+            self.image_path_edit.clear()
+            self.description_edit.clear()
+            self.edit_group.setEnabled(False)
+            self.btn_save.setEnabled(False)
+            self.btn_delete.setEnabled(False)
+            self.name_en_edit.setReadOnly(False)
+
+    def _browse_image(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "選擇禮物圖片", "", "圖片檔案 (*.webp *.png *.jpg *.jpeg *.gif)"
+        )
+        if path:
+            self.image_path_edit.setText(path)
+
+    def _add_gift(self):
+        # 取消目前選中，進入新增模式
+        self.gift_list_widget.setCurrentItem(None)
+        self.edit_group.setEnabled(True)
+        self.btn_save.setEnabled(True)
+        self.btn_delete.setEnabled(False)
+        self.name_en_edit.setReadOnly(False)
+        self.name_cn_edit.setFocus()
+
+    def _save_gift(self):
+        current_item = self.gift_list_widget.currentItem()
+        name_cn = self.name_cn_edit.text().strip()
+        name_en = self.name_en_edit.text().strip()
+        gift_id = self.id_edit.text().strip()
+        image_path = self.image_path_edit.text().strip()
+        description = self.description_edit.text().strip()
+
+        if not name_cn or not name_en:
+            QMessageBox.warning(self, "輸入錯誤", "中文名稱和英文關鍵字為必填項。")
             return
-        gifts = self.gift_manager.get_all_gifts()
-        self.table.setRowCount(len(gifts))
-        for row, gift in enumerate(gifts):
-            self.table.setItem(row, 0, QTableWidgetItem(gift.get("name_cn", "")))
-            self.table.setItem(row, 1, QTableWidgetItem(gift.get("name_en", "")))
-            self.table.setItem(row, 2, QTableWidgetItem(gift.get("id", "")))
-            img_path = gift.get("image_path", "")
-            self.table.setItem(
-                row, 3,
-                QTableWidgetItem(os.path.basename(img_path)
-                                 if img_path else "未設定"))
-            self.table.setItem(row, 4,
-                               QTableWidgetItem(gift.get("description", "")))
 
-    def _add_item(self):
-        dialog = GiftEditor(self, predefined_gifts=self.predefined_gift_manager.get_all())
-        if dialog.exec():
-            new_data = dialog.get_data()
-            if not new_data["name_cn"] or not new_data["name_en"]:
-                QMessageBox.warning(self, "提示", "中文名和英文关键字不能为空。")
+        new_gift_info = {
+            "name_cn": name_cn,
+            "name_en": name_en,
+            "id": gift_id,
+            "image_path": image_path,
+            "description": description
+        }
+
+        if current_item:  # 編輯模式
+            original_name_en = current_item.data(Qt.ItemDataRole.UserRole).get("name_en")
+            self.gift_manager.update_gift_by_name(original_name_en, new_gift_info)
+        else:  # 新增模式
+            # 檢查英文名是否已存在
+            if any(g.get("name_en", "").lower() == name_en.lower() for g in self.gift_manager.get_all_gifts()):
+                QMessageBox.warning(self, "新增失敗", f"英文關鍵字 '{name_en}' 已存在，請使用其他名稱。")
                 return
-            self.gift_manager.add_gift(new_data)
-            self._refresh_table()
+            self.gift_manager.add_gift(new_gift_info)
 
-    def _edit_item(self):
-        current_row = self.table.currentRow()
-        if current_row < 0:
-            QMessageBox.warning(self, "提示", "请先选择一个要编辑的礼物。")
+        self._refresh_list()
+
+    def _delete_gift(self):
+        current_item = self.gift_list_widget.currentItem()
+        if not current_item:
             return
 
-        original_name_en_item = self.table.item(current_row, 1)
-        if not original_name_en_item or not original_name_en_item.text():
-            QMessageBox.warning(self, "錯誤", "無法獲取選定禮物的唯一標識(英文名)。")
-            return
-        original_name_en = original_name_en_item.text()
-
-        item_data_to_edit = None
-        for gift in self.gift_manager.gifts:
-            if gift.get("name_en") == original_name_en:
-                item_data_to_edit = gift
-                break
-
-        if not item_data_to_edit:
-            QMessageBox.critical(self, "嚴重錯誤", "在資料源中找不到選定的禮物，無法編輯。")
-            return
-
-        dialog = GiftEditor(self, item=item_data_to_edit, predefined_gifts=self.predefined_gift_manager.get_all())
-        if dialog.exec():
-            updated_data = dialog.get_data()
-            if not updated_data["name_cn"] or not updated_data["name_en"]:
-                QMessageBox.warning(self, "提示", "中文名和英文关键字不能为空。")
-                return
-
-            self.gift_manager.update_gift_by_name(original_name_en, updated_data)
-            self._refresh_table()
-
-    def _del_item(self):
-        current_row = self.table.currentRow()
-        if current_row < 0:
-            QMessageBox.warning(self, "提示", "请先选择一个要删除的礼物。")
-            return
-
-        name_en_item = self.table.item(current_row, 1)
-        if not name_en_item or not name_en_item.text():
-            QMessageBox.warning(self, "錯誤", "無法獲取選定禮物的唯一標識(英文名)。")
-            return
-
-        name_en_to_delete = name_en_item.text()
-
-        name_cn_item = self.table.item(current_row, 0)
-        display_name = name_cn_item.text() if name_cn_item else name_en_to_delete
-
+        gift_data = current_item.data(Qt.ItemDataRole.UserRole)
+        name_en = gift_data.get("name_en")
         reply = QMessageBox.question(
-            self, "确认删除", f"确定要删除礼物「{display_name}」吗？")
-
+            self, "確認刪除", f"確定要刪除禮物 '{gift_data.get('name_cn')}' 嗎？"
+        )
         if reply == QMessageBox.StandardButton.Yes:
-            self.gift_manager.delete_gift_by_name(name_en_to_delete)
-            self._refresh_table()
+            self.gift_manager.delete_gift_by_name(name_en)
+            self._refresh_list()
+
+    # --- 關鍵新增：批次新增的邏輯實作 ---
+    def _batch_add_from_filenames(self):
+        """
+        開啟多選檔案對話框，並根據檔名批次新增禮物。
+        """
+        image_paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "選擇多個禮物圖片進行批次新增",
+            "",
+            "圖片檔案 (*.webp *.png *.jpg *.jpeg *.gif)"
+        )
+
+        if not image_paths:
+            return
+
+        gifts_to_add = []
+        skipped_count = 0
+
+        # 為了檢查重複，先獲取現有禮物的英文名集合
+        existing_names = {g.get("name_en", "").lower() for g in self.gift_manager.get_all_gifts()}
+
+        for path in image_paths:
+            # 從路徑中獲取不含副檔名的檔名
+            base_name = os.path.splitext(os.path.basename(path))[0]
+
+            # 如果檔名為空或已存在，則跳過
+            if not base_name or base_name.lower() in existing_names:
+                skipped_count += 1
+                continue
+
+            new_gift = {
+                "name_cn": base_name,
+                "name_en": base_name,
+                "id": base_name,
+                "image_path": path,
+                "description": ""  # 描述留空讓使用者後續編輯
+            }
+            gifts_to_add.append(new_gift)
+            # 將新名稱加入集合，以防本次批次內部有同名檔案
+            existing_names.add(base_name.lower())
+
+        if not gifts_to_add:
+            QMessageBox.information(self, "批次新增",
+                                    f"沒有新增任何禮物。可能原因：選擇的檔案名稱已存在於清單中。\n共跳過 {skipped_count} 個檔案。")
+            return
+
+        # 呼叫我們在 GiftManager 中新增的批次處理方法
+        added_count = self.gift_manager.add_gifts_batch(gifts_to_add)
+
+        # 刷新列表以顯示新項目
+        self._refresh_list()
+
+        # 顯示結果報告
+        summary_message = f"成功新增 {added_count} 個新禮物。"
+        if skipped_count > 0:
+            summary_message += f"\n因名稱重複或無效，跳過了 {skipped_count} 個檔案。"
+
+        QMessageBox.information(self, "批次新增完成", summary_message)
 
 
 class MenuItemWidget(QWidget):
