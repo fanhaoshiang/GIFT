@@ -256,6 +256,32 @@ class GiftManager:
         self.gifts.append(gift_info)
         self.save()
 
+    def add_gifts_batch(self, gifts_to_add: List[GiftInfo]) -> int:
+        """
+        批次新增多個禮物，並只儲存一次。
+        返回成功新增的禮物數量。
+        """
+        if not gifts_to_add:
+            return 0
+
+        # 為了避免重複，先建立一個現有英文名的集合
+        existing_names = {g.get("name_en", "").lower() for g in self.gifts if g.get("name_en")}
+
+        added_count = 0
+        for new_gift in gifts_to_add:
+            new_name_en = new_gift.get("name_en", "").lower()
+            # 如果提供了英文名，且該名稱尚未存在，才進行新增
+            if new_name_en and new_name_en not in existing_names:
+                self.gifts.append(new_gift)
+                existing_names.add(new_name_en)  # 更新集合，以防批次內部有重複
+                added_count += 1
+
+        # 如果有任何禮物被成功新增，才執行存檔
+        if added_count > 0:
+            self.save()
+
+        return added_count
+
     def update_gift_by_name(self, original_name_en: str, new_gift_info: GiftInfo):
         """根據禮物的原始英文名來更新禮物資訊"""
         for i, gift in enumerate(self.gifts):
