@@ -1446,6 +1446,10 @@ class MainWindow(QMainWindow):
         self._overlay_prev_opacity: float = 1.0
         #self._menu_prev_opacity: float = 1.0  # 新增：菜單視窗前一個不透明度
 
+        # 播放時間追蹤（用於 debug 延遲）
+        self._playback_end_time: Optional[float] = None
+        self._play_next_if_idle_time: Optional[float] = None
+
         # --- 2. 設定 UI ---
         self._setup_ui()
 
@@ -2911,6 +2915,14 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"Overlay UltraLite - {self.VERSION} [待播: {len(self.queue)}]")
 
     def _play_next_if_idle(self):
+        # [LOG] 記錄 _play_next_if_idle 開始時間
+        self._play_next_if_idle_time = time.time()
+        if self._playback_end_time is not None:
+            time_diff = self._play_next_if_idle_time - self._playback_end_time
+            self._log(f"[LOG] 開始 _play_next_if_idle: {self._play_next_if_idle_time:.3f}, 距離播放結束 {time_diff:.3f} 秒")
+        else:
+            self._log(f"[LOG] 開始 _play_next_if_idle: {self._play_next_if_idle_time:.3f}")
+        
         if self.player_state != PlayerState.IDLE or self.is_editing:
             return
         job = self.queue.pop_next()
@@ -2929,6 +2941,14 @@ class MainWindow(QMainWindow):
 
     # 替換 MainWindow._start_job 內套用音量的兩行
     def _start_job(self, path: str):
+        # [LOG] 記錄 _start_job 開始時間
+        start_job_time = time.time()
+        if self._play_next_if_idle_time is not None:
+            time_diff = start_job_time - self._play_next_if_idle_time
+            self._log(f"[LOG] 開始 _start_job: {start_job_time:.3f}, 距離 _play_next_if_idle {time_diff:.3f} 秒")
+        else:
+            self._log(f"[LOG] 開始 _start_job: {start_job_time:.3f}")
+        
         if not os.path.exists(path):
             self._log(f"錯誤: 檔案不存在 - {path}")
             self._play_next_if_idle()
@@ -2951,6 +2971,10 @@ class MainWindow(QMainWindow):
         self.player.set_volume(eff)
 
     def _on_playback_end(self):
+        # [LOG] 記錄播放結束時間
+        self._playback_end_time = time.time()
+        self._log(f"[LOG] 播放結束: {self._playback_end_time:.3f}")
+        
         if self.is_editing:
             return
 
